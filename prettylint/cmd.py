@@ -134,23 +134,38 @@ def is_package_dir(dir_name):
 
 class PyLintRunner(object):
 
+    _logger = logging.getLogger('pylint')
+    _module = None
+    _file = None
+
     def __init__(self, root_dir):
         self._root_dir = root_dir
         self._stdout = PyLintStream(self, logging.INFO)
         self._stderr = PyLintStream(self, logging.ERROR)
-        self._logger = logging.getLogger(
-            'pylint.' + os.path.basename(root_dir))
 
     def parse(self, message, level):
         message = message.strip()
         # Ignore whitespaces
         if message:
-            if message.startswith('E: '):
+            if message.startswith('************* Module '):
+                _, _, name = message.split()
+                self.enter_module(name)
+            elif message[0].isalpha() and message[1:].startswith(': '):
                 level = logging.ERROR
             elif message.startswith('W: '):
                 level = logging.WARN
 
             self._logger.log(level, '%s', message)
+
+    def enter_module(self, name):
+        self._module = name
+        self._logger = logging.getLogger(name)
+        end_point = os.path.join(self._root_dir, name.replace('.', '/'))
+        if os.path.isdir(end_point):
+            self._file = os.path.join(end_point, "__init__".py)
+        else:
+            self._file = end_point + ".py"
+        assert os.path.isfile(self._file)
 
     def run(self, modules):
         # take a copy of the original sys.path, sys.stdout and sys.stderr
