@@ -139,6 +139,7 @@ class PyLintRunner(object):
     _file = None
 
     def __init__(self, root_dir):
+        LOG.debug("Enters directory: %r", root_dir)
         self._root_dir = root_dir
         self._stdout = PyLintStream(self, logging.INFO)
         self._stderr = PyLintStream(self, logging.ERROR)
