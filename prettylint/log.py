@@ -165,6 +165,7 @@ class ColoredFormatter(logging.Formatter):
 
 def configure_logging(level=logging.INFO):
     logging.basicConfig(
-        format='%(levelname)-7s %(name)-16s | %(message)s',
-        level=logging.DEBUG
+        # format='%(levelname)-7s %(name)-16s | %(message)s',
+        format='%(message)s',
+        level=logging.INFO
     )
