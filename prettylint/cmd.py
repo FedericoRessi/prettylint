@@ -42,12 +42,16 @@ def main():
     for item in options.files_or_dirs:
         LOG.debug("Looking at %r", item)
         for module_info in find_modules_from_string(item):
-            modules_in_folders[module_info.root_dir].append(module_info)
+            modules_in_folders[module_info.root_dir].append(module_info.name)
 
-        # take a copy of the original sys.path
-        for folder, modules in six.iteritems(modules_in_folders):
-            runner = PyLintRunner(folder)
-            status = runner.run(modules) or status
+    # Run PyLint on all found modules
+    for folder, modules in six.iteritems(modules_in_folders):
+        LOG.debug(
+            'Run Pyliny on folder %r and modules: %s',
+            folder, ', '.join(modules)
+        )
+        runner = PyLintRunner(folder)
+        status = runner.run(modules) or status
 
     sys.exit(status)
 
@@ -60,18 +64,20 @@ def find_modules_from_string(item):
                 yield entry
         elif os.path.isfile(file_or_dir):
             LOG.debug('Looking at file: %r', file_or_dir)
-            yield find_module_from_file(file_or_dir)
+            for module_info in find_module_from_file(file_or_dir):
+                yield module_info
         else:
             raise FileNotFoundError(
                 "No such file or folder: '{}'".format(file_or_dir))
 
 
 def find_module_from_file(file_name):
-    module_info = ModuleInfo.from_file(file_name)
-    LOG.debug(
-        "Found module: %r in dir %r",
-        module_info.name, module_info.root_dir)
-    return module_info
+    if file_name.endswith('.py'):
+        module_info = ModuleInfo.from_file(file_name)
+        LOG.debug(
+            "Found module: %r in dir %r",
+            module_info.name, module_info.root_dir)
+        yield module_info
 
 
 def find_modules_from_dir(dir_name):
@@ -87,8 +93,10 @@ def find_modules_from_dir(dir_name):
 
     else:
         LOG.debug("Looking for python sources in dir: %r", dir_name)
-        for entry in find_modules_from_string(os.path.join(dir_name, "*.py")):
-            yield entry
+        for item in os.listdir(dir_name):
+            for module_info in find_modules_from_string(
+                    os.path.join(dir_name, item)):
+                yield module_info
 
 
 class ModuleInfo(namedtuple('ModuleInfo', ['name', 'root_dir'])):
@@ -173,11 +181,12 @@ class PyLintRunner(object):
         original_path = list(sys.path)
         original_stdout = sys.stdout
         original_stderr = sys.stderr
+        sys.path = [self._root_dir] + original_path
         sys.stdout = self._stdout
         sys.stderr = self._stderr
 
         try:
-            command_line = [module_info.name for module_info in modules]
+            command_line = list(modules)
             LOG.debug("Running pylint: %r", command_line)
             Run(command_line)
 
