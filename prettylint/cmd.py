@@ -12,7 +12,6 @@ import os
 import sys
 
 # from pypa installed packages
-import six
 from pylint.lint import Run
 
 # from prettylynt package
@@ -38,22 +37,15 @@ def main():
     options = parser.parse_args()
 
     # Classify module names by its package root folder
-    modules_in_folders = defaultdict(list)
+    modules = list()
     for item in options.files_or_dirs:
         LOG.debug("Looking at %r", item)
         for module_info in find_modules_from_string(item):
-            modules_in_folders[module_info.root_dir].append(module_info.name)
+            modules.append(module_info)
 
     runner = PyLintRunner()
     errors = PylintErrors()
-
-    # Run PyLint on all found modules
-    for folder, modules in six.iteritems(modules_in_folders):
-        LOG.debug(
-            'Run Pyliny on folder %r and modules: %s',
-            folder, ', '.join(modules)
-        )
-        runner.run(folder, modules, errors)
+    runner.run(modules, errors)
 
     if errors:
         errors.pretty_print()
@@ -120,7 +112,8 @@ def find_modules_from_dir(dir_name):
                 yield module_info
 
 
-class ModuleInfo(namedtuple('ModuleInfo', ['name', 'root_dir'])):
+class ModuleInfo(
+        namedtuple('ModuleInfo', ['name', 'path', 'root_dir'])):
     '''Model for basic python module details
     '''
 
@@ -136,7 +129,11 @@ class ModuleInfo(namedtuple('ModuleInfo', ['name', 'root_dir'])):
             LOG.debug("Getting package name from dir %r", root_dir)
             names.append(name)
 
-        return cls(name='.'.join(reversed(names)), root_dir=root_dir)
+        return cls(
+            name='.'.join(reversed(names)),
+            path=os.path.relpath(dir_name),
+            root_dir=root_dir
+        )
 
     @classmethod
     def from_file(cls, file_name):
@@ -153,7 +150,11 @@ class ModuleInfo(namedtuple('ModuleInfo', ['name', 'root_dir'])):
             root_dir = package_info.root_dir
             name = package_info.name + '.' + name
 
-        return cls(name=name, root_dir=root_dir)
+        return cls(
+            name=name,
+            path=os.path.relpath(file_name),
+            root_dir=root_dir
+        )
 
 
 def is_package_dir(dir_name):
@@ -172,21 +173,43 @@ class PyLintRunner(object):
         self._stdout = PyLintStream(self, logging.DEBUG)
         self._stderr = PyLintStream(self, logging.ERROR)
 
-    def run(self, root_dir, modules, errors):
-        LOG.debug("Enters directory: %r", root_dir)
-        self._root_dir = root_dir
+    def run(self, modules, errors):
+        '''Run pylint on given modules filling out errors list
+
+        :param modules: a sequence of ModuleInfo instance
+        :param errors: an instance of PyLintErrors
+        :return: None
+        '''
+
+        # Get a list of root dirs that are already on the PYTHONPATH
+        existing_root_dirs = set(
+            os.path.normcase(os.path.abspath(path))
+            for path in sys.path
+            if os.path.exists(path)
+        )
+
+        # Get a list of root dirs that has to be added to the PYTHONPATH
+        # before running pylint
+        new_root_dirs = []
+        for module_info in modules:
+            if module_info.root_dir not in existing_root_dirs:
+                new_root_dirs.append(module_info.root_dir)
+                existing_root_dirs.add(module_info.root_dir)
+
         self._errors = errors
 
-        # take a copy of the original sys.path, sys.stdout and sys.stderr
+        # add missing modules root dirs to the path
         original_path = list(sys.path)
+        sys.path = new_root_dirs + original_path
+
+        # redirect stderr and stdout to self.parse method
         original_stdout = sys.stdout
         original_stderr = sys.stderr
-        sys.path = [self._root_dir] + original_path
         sys.stdout = self._stdout
         sys.stderr = self._stderr
 
         try:
-            command_line = list(modules)
+            command_line = ['-f', 'parseable'] + [m.name for m in modules]
             LOG.debug("Running pylint: %r", command_line)
             Run(command_line)
 
@@ -201,33 +224,36 @@ class PyLintRunner(object):
 
     def parse(self, message, level):
         message = message.strip()
+        LOG.log(level, "%s", message.strip())
+
         # Ignore whitespaces
         if message:
             if message.startswith('************* Module '):
-                _, _, name = message.split()
+                _, _, name = split(message, maxsplit=2)
                 self.enter_module(name)
-
-            elif message[0].isalpha() and message[1:].startswith(':'):
-                tag, location, text = split(message, ':')
-                line, column = split(location, ',')
-                self._errors.add(
-                    module_name=self._module, file_name=self._file, line=line,
-                    column=column, tag=tag, message=text
-                )
-
-        LOG.log(level, "%s", message)
+            else:
+                fields = split(message, ':', 2)
+                self._logger.debug("%r", fields)
+                if len(fields) == 3:
+                    file_name, line, rest = fields
+                    if os.path.isfile(file_name):
+                        _, rest = split(rest, '[', 1)
+                        rest, message = split(rest, ']', 1)
+                        tag, _ = split(rest, ',', 1)
+                        # assert module_name == self._module
+                        self._errors.add(
+                            file_name=file_name,
+                            line=line,
+                            module_name=self._module,
+                            tag=tag,
+                            message=message
+                        )
 
     def enter_module(self, name):
+        pass
         self._module = name
         self._logger = logging.getLogger(name)
-        end_point = os.path.relpath(
-            os.path.join(self._root_dir, name.replace('.', '/')))
-        if os.path.isdir(end_point):
-            self._file = os.path.join(end_point, "__init__".py)
-        else:
-            self._file = end_point + ".py"
-        assert os.path.isfile(self._file)
-        self._logger.debug("Errors in file: %s", self._file)
+        self._logger.debug("Errors in module: %s", name)
 
 
 class PyLintStream(object):
@@ -239,17 +265,17 @@ class PyLintStream(object):
         self._parser.parse(message, level=self._level)
 
 
-def split(string, separator):
-    return [p.strip() for p in string.split(separator)]
+def split(string, sep=None, maxsplit=-1):
+    return [p.strip() for p in string.split(sep=sep, maxsplit=maxsplit)]
 
 
 class PyLintError(namedtuple(
-        'PyLintError', ('file_name', 'line', 'column', 'tag', 'message'))):
+        'PyLintError', ('file_name', 'line', 'tag', 'message'))):
     '''Model for basic python module details
     '''
 
     def pretty_format(self):
-        return '{file_name}:{line}:{column}: {tag} {message}'.format(
+        return '{file_name}:{line}: {tag} {message}'.format(
             **self._asdict()
         )
 
@@ -260,13 +286,12 @@ class PylintErrors(object):
     def __init__(self):
         self._errors = defaultdict(list)
 
-    def add(self, module_name, file_name, line, column, tag, message):
+    def add(self, module_name, file_name, line, tag, message):
         self._has_errors = True
         self._errors[module_name].append(
             PyLintError(
                 file_name=file_name,
                 line=int(line),
-                column=int(column),
                 tag=tag,
                 message=message
             )
@@ -283,7 +308,7 @@ class PylintErrors(object):
         for module_name, errors in self:
             logger = logging.getLogger(module_name)
             logger.error(
-                "Module %s has %d error(s):", module_name, len(errors)
+                "\nModule %s has %d error(s):", module_name, len(errors)
             )
             for e in errors:
                 logger.error("%s", e.pretty_format())
